@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { NextRequest, NextResponse } from "next/server";
-import { findProductByIngredient } from "@/lib/product-search";
+import { findProductByIngredient, findBestMatch } from "@/lib/product-search";
 
 export const maxDuration = 30;
 
@@ -48,12 +48,6 @@ type ClaudeResult =
   | { mode: "symptom"; symptom: string; items: SymptomItem[] }
   | { mode: "urgent"; message: string };
 
-async function findWithFallback(query: string, fallback: string) {
-  const primary = await findProductByIngredient(query);
-  if (primary) return primary;
-  if (fallback?.trim()) return findProductByIngredient(fallback);
-  return null;
-}
 
 export async function POST(req: NextRequest) {
   try {
@@ -118,7 +112,7 @@ export async function POST(req: NextRequest) {
     }
     const results = await Promise.all(
       items.map(async (item) => {
-        const product = await findWithFallback(item.query, item.fallback ?? "");
+        const product = await findBestMatch(item.query, item.fallback ?? "");
         return {
           query: item.query,
           dose: item.dose ?? "",

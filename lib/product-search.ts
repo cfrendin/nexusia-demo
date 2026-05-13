@@ -55,6 +55,38 @@ export async function findProductByIngredient(
   return pickBest((byPrefix ?? []) as ProductRow[], prefix);
 }
 
+export async function findBestMatch(
+  query: string,
+  fallback: string
+): Promise<{ name: string } | null> {
+  const q = query.trim();
+
+  // Tier 1: query in name, single drug
+  const { data: t1 } = await supabase
+    .from("products").select("name").ilike("name", `%${q}%`).not("name", "ilike", "%+%").limit(5);
+  if (t1?.length) return t1[0];
+
+  // Tier 2: query in name, combos allowed
+  const { data: t2 } = await supabase
+    .from("products").select("name").ilike("name", `%${q}%`).limit(5);
+  if (t2?.length) return t2[0];
+
+  const fb = fallback?.trim();
+  if (!fb || fb === q) return null;
+
+  // Tier 3: fallback (generic) in name, single drug
+  const { data: t3 } = await supabase
+    .from("products").select("name").ilike("name", `%${fb}%`).not("name", "ilike", "%+%").limit(5);
+  if (t3?.length) return t3[0];
+
+  // Tier 4: fallback in name, combos allowed
+  const { data: t4 } = await supabase
+    .from("products").select("name").ilike("name", `%${fb}%`).limit(5);
+  if (t4?.length) return t4[0];
+
+  return null;
+}
+
 export function extractActiveIngredient(nombre: string): string {
   const parts = nombre.trim().split(/\s+/);
   const stopIdx = parts.findIndex((p) => /^\d/.test(p));

@@ -1,10 +1,15 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { NextRequest, NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
+import { findBestMatch } from "@/lib/product-search";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-type MedExtracted = { nombre: string; dosis?: string; presentacion?: string };
+type MedExtracted = {
+  nombre: string;
+  marca?: string;
+  dosis?: string;
+  presentacion?: string;
+};
 
 type ResultRow = {
   written: string;
@@ -13,17 +18,13 @@ type ResultRow = {
   available: boolean;
 };
 
-// "Esomeprazol 20 mg" → "Esomeprazol"
-// "Losartan potásico 50mg" → "Losartan potásico"
 function extractActiveIngredient(nombre: string): string {
   const parts = nombre.trim().split(/\s+/);
-  // Stop at the first token that begins with a digit
   const stopIdx = parts.findIndex((p) => /^\d/.test(p));
   const words = stopIdx > 0 ? parts.slice(0, stopIdx) : parts.slice(0, 2);
   return words.join(" ").trim() || nombre.trim();
 }
 
-// Extract dose string for confidence scoring: "20 mg" → "20mg"
 function normalizeDose(text: string): string {
   const m = text.match(/\d+\s*(?:mg|g|ml|mcg|ui|iu)/i);
   return m ? m[0].replace(/\s+/g, "").toLowerCase() : "";
@@ -47,109 +48,7 @@ function confidenceScore(
   if (startsWith) return 91;
   if (contains && doseMatch) return 87;
   if (contains) return 82;
-  return 74; // prefix-only match
-}
-
-type ProductRow = { name: string; generic_name: string | null };
-
-// Returns true when a product is a combination drug.
-// generic_name is NULL in the real catalog — fall back to checking name.
-const isCombo = (row: ProductRow) =>
-  (!!row.generic_name && row.generic_name.includes("+")) || row.name.includes("+");
-
-// Assign a ranking tier — lower is better
-function tier(row: ProductRow, activeIngredient: string): number {
-  const a = activeIngredient.toLowerCase();
-  const g = (row.generic_name ?? "").toLowerCase().trim();
-  const combo = isCombo(row);
-  const n = row.name.toLowerCase();
-
-  if (g === a && !combo) return 1;           // exact generic match, single drug
-  if (g.startsWith(a) && !combo) return 2;  // generic starts with, single drug
-  if (n.startsWith(a) && !combo) return 3;  // name starts with ingredient, single drug
-  if (n.includes(a) && !combo) return 4;    // name contains ingredient, single drug
-  if (!combo) return 5;                     // any single-drug match
-  return 6;                                 // combo — last resort
-}
-
-function pickBest(rows: ProductRow[], activeIngredient: string): ProductRow | null {
-  if (!rows.length) return null;
-  return rows.reduce((best, r) =>
-    tier(r, activeIngredient) < tier(best, activeIngredient) ? r : best
-  );
-}
-
-async function findProduct(
-  activeIngredient: string
-): Promise<{ name: string } | null> {
-  const SELECT = "name, generic_name";
-  console.log("[RECETAS] extracted ingredient:", activeIngredient);
-
-  // Run exact generic_name match and fuzzy name match in parallel
-  const [{ data: byExact, error: e1 }, { data: byName, error: e2 }] = await Promise.all([
-    supabase
-      .from("products")
-      .select(SELECT)
-      .ilike("generic_name", activeIngredient) // exact (no wildcards)
-      .order("name")
-      .limit(10),
-    supabase
-      .from("products")
-      .select(SELECT)
-      .ilike("name", `%${activeIngredient}%`)
-      .order("name")
-      .limit(10),
-  ]);
-
-  console.log("[RECETAS] byExact (generic_name =):", byExact?.length ?? 0, e1?.message ?? "ok", byExact?.map(r => r.generic_name));
-  console.log("[RECETAS] byName (name ilike):", byName?.length ?? 0, e2?.message ?? "ok", byName?.map(r => r.name));
-
-  const combined = [...(byExact ?? []), ...(byName ?? [])] as ProductRow[];
-  const best = pickBest(combined, activeIngredient);
-  if (best) {
-    const winningTier = tier(best, activeIngredient);
-    console.log("[RECETAS] winner from round1 — tier:", winningTier, "match:", best.name, "generic:", best.generic_name);
-    return best;
-  }
-
-  // Fuzzy fallback: search generic_name
-  const { data: byGeneric, error: e3 } = await supabase
-    .from("products")
-    .select(SELECT)
-    .ilike("generic_name", `%${activeIngredient}%`)
-    .order("name")
-    .limit(10);
-
-  console.log("[RECETAS] byGeneric (generic_name ilike):", byGeneric?.length ?? 0, e3?.message ?? "ok", byGeneric?.map(r => r.generic_name));
-
-  const bestGeneric = pickBest((byGeneric ?? []) as ProductRow[], activeIngredient);
-  if (bestGeneric) {
-    const winningTier = tier(bestGeneric, activeIngredient);
-    console.log("[RECETAS] winner from round2 — tier:", winningTier, "match:", bestGeneric.name, "generic:", bestGeneric.generic_name);
-    return bestGeneric;
-  }
-
-  // Prefix fallback (first 5 chars)
-  const prefix = activeIngredient.slice(0, 5);
-  if (prefix.length < 4) return null;
-
-  const { data: byPrefix, error: e4 } = await supabase
-    .from("products")
-    .select(SELECT)
-    .ilike("name", `%${prefix}%`)
-    .order("name")
-    .limit(10);
-
-  console.log("[RECETAS] byPrefix (name ilike prefix):", byPrefix?.length ?? 0, e4?.message ?? "ok", byPrefix?.map(r => r.name));
-
-  const bestPrefix = pickBest((byPrefix ?? []) as ProductRow[], prefix);
-  if (bestPrefix) {
-    const winningTier = tier(bestPrefix, prefix);
-    console.log("[RECETAS] winner from prefix fallback — tier:", winningTier, "match:", bestPrefix.name, "generic:", bestPrefix.generic_name);
-  } else {
-    console.log("[RECETAS] NO MATCH FOUND for:", activeIngredient);
-  }
-  return bestPrefix;
+  return 74;
 }
 
 export async function POST(req: NextRequest) {
@@ -173,7 +72,6 @@ export async function POST(req: NextRequest) {
       | "image/gif"
       | "image/webp";
 
-    // Claude Vision — extract medications
     const visionResponse = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 1024,
@@ -189,8 +87,11 @@ export async function POST(req: NextRequest) {
               type: "text",
               text: `Analiza esta receta médica. Extrae cada medicamento.
 Responde ÚNICAMENTE con JSON válido, sin texto adicional ni markdown:
-[{"nombre": "nombre genérico solo (sin marca)", "dosis": "dosis y unidad", "presentacion": "forma farmacéutica"}]
-Ejemplo: [{"nombre":"Metformina","dosis":"850 mg","presentacion":"tabletas"}]
+[{"nombre": "nombre genérico", "marca": "marca comercial si se menciona, si no vacío", "dosis": "dosis y unidad", "presentacion": "forma farmacéutica"}]
+Ejemplos:
+- "Atamel 500mg tabletas" → {"nombre":"Acetaminofén","marca":"atamel","dosis":"500 mg","presentacion":"tabletas"}
+- "Metformina 850mg" → {"nombre":"Metformina","marca":"","dosis":"850 mg","presentacion":"tabletas"}
+- "Nexium 20mg" → {"nombre":"Esomeprazol","marca":"nexium","dosis":"20 mg","presentacion":"cápsulas"}
 Si no es una receta o no puedes leerla, responde: []`,
             },
           ],
@@ -221,15 +122,17 @@ Si no es una receta o no puedes leerla, responde: []`,
       });
     }
 
-    // Search Supabase for each extracted medication
     const results: ResultRow[] = await Promise.all(
       medications.map(async (med) => {
         const rawNombre = med.nombre?.trim() ?? "";
         const rawDosis = med.dosis?.trim() ?? "";
         const activeIngredient = extractActiveIngredient(rawNombre);
+        const marca = med.marca?.trim().toLowerCase() ?? "";
         const written = rawDosis ? `${rawNombre} ${rawDosis}` : rawNombre;
 
-        const product = await findProduct(activeIngredient);
+        // Search by brand name first (tier 1-2), fall back to generic (tier 3-4)
+        const searchQuery = marca || activeIngredient;
+        const product = await findBestMatch(searchQuery, activeIngredient);
 
         return {
           written,
