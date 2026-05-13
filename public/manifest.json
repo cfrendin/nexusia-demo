@@ -1,0 +1,26 @@
+{
+  "name": "NexusIA Demo",
+  "short_name": "NexusIA",
+  "description": "Inteligencia artificial para Farmatodo — Demo confidencial",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F5F7FA",
+  "theme_color": "#0B3D6B",
+  "orientation": "portrait-primary",
+  "lang": "es",
+  "categories": ["medical", "productivity"],
+  "icons": [
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

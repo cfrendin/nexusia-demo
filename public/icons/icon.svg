@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0B3D6B"/>
+  <rect x="0" y="376" width="512" height="136" rx="0" fill="#00A5B5" opacity="0.25"/>
+  <rect x="0" y="420" width="512" height="92" rx="0" fill="#00A5B5" opacity="0.15"/>
+  <text
+    x="256"
+    y="358"
+    font-family="Georgia, serif"
+    font-size="296"
+    font-weight="700"
+    text-anchor="middle"
+    fill="white"
+    letter-spacing="-8"
+  >N</text>
+  <circle cx="390" cy="122" r="28" fill="#00A5B5" opacity="0.8"/>
+  <circle cx="122" cy="390" r="18" fill="#1A7AB5" opacity="0.6"/>
+</svg>
