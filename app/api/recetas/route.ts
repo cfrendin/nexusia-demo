@@ -52,20 +52,24 @@ function confidenceScore(
 
 type ProductRow = { name: string; generic_name: string | null };
 
-// Returns true when a generic_name string represents a combination drug
-const isCombo = (g: string | null) => !!g && g.includes("+");
+// Returns true when a product is a combination drug.
+// generic_name is NULL in the real catalog — fall back to checking name.
+const isCombo = (row: ProductRow) =>
+  (!!row.generic_name && row.generic_name.includes("+")) || row.name.includes("+");
 
 // Assign a ranking tier — lower is better
 function tier(row: ProductRow, activeIngredient: string): number {
   const a = activeIngredient.toLowerCase();
   const g = (row.generic_name ?? "").toLowerCase().trim();
-  const combo = isCombo(row.generic_name);
+  const combo = isCombo(row);
+  const n = row.name.toLowerCase();
 
-  if (g === a && !combo) return 1;                    // exact generic, single drug
-  if (g.startsWith(a) && !combo) return 2;            // generic starts with, single drug
-  if (row.name.toLowerCase().includes(a) && !combo) return 3; // name contains, single drug
-  if (!combo) return 4;                               // any single-drug match
-  return 5;                                           // combo fallback
+  if (g === a && !combo) return 1;           // exact generic match, single drug
+  if (g.startsWith(a) && !combo) return 2;  // generic starts with, single drug
+  if (n.startsWith(a) && !combo) return 3;  // name starts with ingredient, single drug
+  if (n.includes(a) && !combo) return 4;    // name contains ingredient, single drug
+  if (!combo) return 5;                     // any single-drug match
+  return 6;                                 // combo — last resort
 }
 
 function pickBest(rows: ProductRow[], activeIngredient: string): ProductRow | null {
