@@ -6,19 +6,38 @@ export const maxDuration = 30;
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const SYSTEM = `Eres un asistente de Farmatodo. El usuario dictó una lista de medicamentos por voz.
-Tu único trabajo es extraer los productos mencionados y devolver un JSON con esta forma exacta:
+const SYSTEM = `Eres un asistente de Farmatodo. El usuario te dictó algo por voz. Detecta si está pidiendo:
 
-{ "items": [{ "query": "acetaminofen", "dose": "500mg" }, ...] }
+MODO A — Medicamentos específicos (ej: 'acetaminofén, ibuprofeno'):
+Devuelve: { "mode": "explicit", "items": [{ "query": "acetaminofen", "dose": "" }] }
 
-Reglas:
-- Solo devuelve JSON válido, NADA de texto conversacional
-- "query" es el principio activo limpio en minúsculas (sin dosis, sin marca)
-- "dose" es la dosis si el usuario la mencionó, si no, string vacío ""
-- Si el usuario dice "curitas" o "banditas", usa query "curitas"
-- No hagas preguntas, no pidas confirmación, no expliques nada`;
+MODO B — Síntomas o malestar (ej: 'me duele la cabeza', 'tengo gripe', 'me duele la barriga'):
+Devuelve: { "mode": "symptom", "symptom": "<síntoma resumido>", "items": [{ "query": "<medicamento OTC sugerido>", "reason": "<por qué este>" }, ...] }
 
-type ExtractedItem = { query: string; dose: string };
+Reglas para MODO B:
+- Solo sugiere medicamentos OTC de venta libre. NUNCA antibióticos, antidepresivos, medicamentos controlados.
+- Máximo 3 sugerencias por síntoma.
+- Categorías comunes:
+  * Dolor de cabeza → acetaminofen, ibuprofeno
+  * Dolor de barriga/estómago → antiacido, simeticona, sales de rehidratacion
+  * Gripe/resfriado → acetaminofen, descongestionante, vitamina c
+  * Fiebre → acetaminofen, ibuprofeno
+  * Alergia → loratadina, cetirizina
+  * Tos → ambroxol, dextrometorfano
+  * Diarrea → loperamida, sales de rehidratacion
+  * Acidez → omeprazol, ranitidina, antiacido
+- 'reason' debe ser breve, máximo 8 palabras (ej: 'Reduce el dolor y la inflamación')
+
+Solo devuelve JSON. NADA de texto conversacional.
+NO des consejo médico. NO diagnostiques.
+Si el síntoma sugiere algo grave (dolor en el pecho, dificultad para respirar, sangrado, dolor severo), devuelve: { "mode": "urgent", "message": "Te recomendamos consultar a un médico de inmediato." }`;
+
+type ExplicitItem = { query: string; dose: string };
+type SymptomItem = { query: string; reason: string };
+type ClaudeResult =
+  | { mode: "explicit"; items: ExplicitItem[] }
+  | { mode: "symptom"; symptom: string; items: SymptomItem[] }
+  | { mode: "urgent"; message: string };
 
 export async function POST(req: NextRequest) {
   try {
@@ -28,7 +47,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No transcript provided" }, { status: 400 });
     }
 
-    // Step 1: Claude extracts medications as structured JSON
     const response = await anthropic.messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 512,
@@ -39,26 +57,49 @@ export async function POST(req: NextRequest) {
     const rawText =
       response.content[0].type === "text" ? response.content[0].text.trim() : "{}";
 
-    let items: ExtractedItem[] = [];
+    let parsed: ClaudeResult | null = null;
     try {
       const cleaned = rawText.replace(/```(?:json)?\n?|\n?```/g, "").trim();
-      const parsed = JSON.parse(cleaned);
-      items = Array.isArray(parsed) ? parsed : (parsed.items ?? []);
+      parsed = JSON.parse(cleaned) as ClaudeResult;
     } catch {
-      const m = rawText.match(/\[[\s\S]*\]/);
+      const m = rawText.match(/\{[\s\S]*\}/);
       if (m) {
-        try { items = JSON.parse(m[0]); } catch { items = []; }
+        try { parsed = JSON.parse(m[0]) as ClaudeResult; } catch { parsed = null; }
       }
     }
 
-    if (!items.length) {
-      return NextResponse.json({
-        error: "No se detectaron medicamentos en el audio.",
-        results: [],
-      });
+    if (!parsed) {
+      return NextResponse.json({ error: "No se pudo interpretar la solicitud.", results: [] });
     }
 
-    // Step 2: Search catalog for each item in parallel (same tier ranking as Módulo 1)
+    if (parsed.mode === "urgent") {
+      return NextResponse.json({ mode: "urgent", urgent: true, message: parsed.message });
+    }
+
+    if (parsed.mode === "symptom") {
+      const { symptom, items } = parsed;
+      if (!items.length) {
+        return NextResponse.json({ error: "No se detectaron sugerencias.", results: [] });
+      }
+      const results = await Promise.all(
+        items.map(async (item) => {
+          const product = await findProductByIngredient(item.query);
+          return {
+            query: item.query,
+            reason: item.reason ?? "",
+            matched: product?.name ?? null,
+            available: product !== null,
+          };
+        })
+      );
+      return NextResponse.json({ mode: "symptom", symptom, results });
+    }
+
+    // explicit mode
+    const items = (parsed as { mode: "explicit"; items: ExplicitItem[] }).items ?? [];
+    if (!items.length) {
+      return NextResponse.json({ error: "No se detectaron medicamentos en el audio.", results: [] });
+    }
     const results = await Promise.all(
       items.map(async (item) => {
         const product = await findProductByIngredient(item.query);
@@ -70,13 +111,9 @@ export async function POST(req: NextRequest) {
         };
       })
     );
-
-    return NextResponse.json({ results });
+    return NextResponse.json({ mode: "explicit", results });
   } catch (err) {
     console.error("[/api/voz/search]", err);
-    return NextResponse.json(
-      { error: "Error al buscar productos." },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Error al buscar productos." }, { status: 500 });
   }
 }

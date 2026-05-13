@@ -2,11 +2,12 @@
 
 import { useState, useRef, useEffect } from "react";
 
-type Step = "idle" | "recording" | "transcribing" | "searching" | "results" | "error";
+type Step = "idle" | "recording" | "transcribing" | "searching" | "results" | "error" | "urgent";
 
 type ProductResult = {
   query: string;
-  dose: string;
+  dose?: string;
+  reason?: string;
   matched: string | null;
   available: boolean;
 };
@@ -33,6 +34,9 @@ export default function VozPage() {
   const [toast, setToast] = useState(false);
   const [toastCount, setToastCount] = useState(0);
   const [permissionDenied, setPermissionDenied] = useState(false);
+  const [responseMode, setResponseMode] = useState<"explicit" | "symptom" | "">("");
+  const [symptomText, setSymptomText] = useState("");
+  const [urgentMsg, setUrgentMsg] = useState("");
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -107,12 +111,20 @@ export default function VozPage() {
       });
       const sData = await sRes.json();
 
+      if (sData.urgent) {
+        setUrgentMsg(sData.message ?? "Te recomendamos consultar a un médico de inmediato.");
+        setStep("urgent");
+        return;
+      }
+
       if (!sRes.ok || sData.error || !sData.results?.length) {
         setStep("error");
         setErrorMsg(sData.error || "No se encontraron productos.");
         return;
       }
 
+      setResponseMode(sData.mode ?? "explicit");
+      setSymptomText(sData.symptom ?? "");
       const r = sData.results as ProductResult[];
       setResults(r);
       setChecked(r.map((item) => item.available && !!item.matched));
@@ -156,6 +168,9 @@ export default function VozPage() {
     setResults([]);
     setChecked([]);
     setErrorMsg("");
+    setResponseMode("");
+    setSymptomText("");
+    setUrgentMsg("");
   };
 
   const checkedCount = checked.filter(Boolean).length;
@@ -349,6 +364,45 @@ export default function VozPage() {
           </div>
         )}
 
+        {/* URGENT */}
+        {step === "urgent" && (
+          <div className="flex flex-col gap-3 animate-fade-up">
+            {transcript && (
+              <div className="flex justify-end">
+                <div
+                  className="max-w-[78%] px-4 py-3 text-sm"
+                  style={{ background: "#0B3D6B", color: "white", fontFamily: "var(--font-dm-sans)", borderRadius: "18px 18px 4px 18px" }}
+                >
+                  {transcript}
+                </div>
+              </div>
+            )}
+            <div
+              className="flex flex-col items-center gap-3 rounded-2xl py-6 px-4 text-center"
+              style={{ background: "rgba(220,38,38,0.06)", border: "2px solid rgba(220,38,38,0.25)" }}
+            >
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                <line x1="12" y1="9" x2="12" y2="13" />
+                <line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+              <p className="text-sm font-semibold leading-snug" style={{ color: "#dc2626", fontFamily: "var(--font-plus-jakarta)" }}>
+                {urgentMsg}
+              </p>
+              <p className="text-xs" style={{ color: "#94a3b8", fontFamily: "var(--font-dm-sans)" }}>
+                Llama al 171 o acude al centro de salud más cercano.
+              </p>
+              <button
+                onClick={handleReset}
+                className="text-sm font-semibold px-5 py-2 rounded-xl"
+                style={{ background: "#0B3D6B", color: "white", fontFamily: "var(--font-dm-sans)" }}
+              >
+                Nueva consulta
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* RESULTS */}
         {step === "results" && (
           <div className="flex flex-col gap-3 animate-fade-up">
@@ -366,6 +420,14 @@ export default function VozPage() {
                 {transcript}
               </div>
             </div>
+
+            {responseMode === "symptom" && symptomText && (
+              <div className="px-1 pt-1 pb-0.5">
+                <p className="text-sm font-semibold" style={{ color: "#0B3D6B", fontFamily: "var(--font-plus-jakarta)" }}>
+                  Para &ldquo;{symptomText}&rdquo; te sugerimos:
+                </p>
+              </div>
+            )}
 
             <p
               className="text-xs uppercase tracking-widest px-1"
@@ -410,6 +472,11 @@ export default function VozPage() {
                     <p className="text-xs font-semibold leading-snug" style={{ color: "#1a2332", fontFamily: "var(--font-dm-sans)" }}>
                       {r.matched ?? "Sin coincidencia en catálogo"}
                     </p>
+                    {r.reason && (
+                      <p className="text-[10px] mt-0.5 leading-tight" style={{ color: "#64748b", fontFamily: "var(--font-dm-sans)" }}>
+                        {r.reason}
+                      </p>
+                    )}
                   </div>
 
                   {/* Status chip */}
@@ -443,6 +510,22 @@ export default function VozPage() {
             >
               Nueva búsqueda
             </button>
+
+            {responseMode === "symptom" && (
+              <div
+                className="flex items-start gap-2 p-3 rounded-xl"
+                style={{ background: "rgba(234,179,8,0.06)", border: "1px solid rgba(234,179,8,0.25)" }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a16207" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mt-0.5 flex-shrink-0">
+                  <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                  <line x1="12" y1="9" x2="12" y2="13" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                </svg>
+                <p className="text-xs leading-relaxed" style={{ color: "#a16207", fontFamily: "var(--font-dm-sans)" }}>
+                  Sugerencias basadas en síntomas. Consulta con tu farmacéutico para tratamiento adecuado.
+                </p>
+              </div>
+            )}
 
             <div
               className="flex items-start gap-2 p-3 rounded-xl"
