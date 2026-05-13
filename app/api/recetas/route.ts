@@ -79,9 +79,10 @@ async function findProduct(
   activeIngredient: string
 ): Promise<{ name: string } | null> {
   const SELECT = "name, generic_name";
+  console.log("[RECETAS] extracted ingredient:", activeIngredient);
 
   // Run exact generic_name match and fuzzy name match in parallel
-  const [{ data: byExact }, { data: byName }] = await Promise.all([
+  const [{ data: byExact, error: e1 }, { data: byName, error: e2 }] = await Promise.all([
     supabase
       .from("products")
       .select(SELECT)
@@ -96,33 +97,55 @@ async function findProduct(
       .limit(10),
   ]);
 
+  console.log("[RECETAS] byExact (generic_name =):", byExact?.length ?? 0, e1?.message ?? "ok", byExact?.map(r => r.generic_name));
+  console.log("[RECETAS] byName (name ilike):", byName?.length ?? 0, e2?.message ?? "ok", byName?.map(r => r.name));
+
   const combined = [...(byExact ?? []), ...(byName ?? [])] as ProductRow[];
   const best = pickBest(combined, activeIngredient);
-  if (best) return best;
+  if (best) {
+    const winningTier = tier(best, activeIngredient);
+    console.log("[RECETAS] winner from round1 — tier:", winningTier, "match:", best.name, "generic:", best.generic_name);
+    return best;
+  }
 
   // Fuzzy fallback: search generic_name
-  const { data: byGeneric } = await supabase
+  const { data: byGeneric, error: e3 } = await supabase
     .from("products")
     .select(SELECT)
     .ilike("generic_name", `%${activeIngredient}%`)
     .order("name")
     .limit(10);
 
+  console.log("[RECETAS] byGeneric (generic_name ilike):", byGeneric?.length ?? 0, e3?.message ?? "ok", byGeneric?.map(r => r.generic_name));
+
   const bestGeneric = pickBest((byGeneric ?? []) as ProductRow[], activeIngredient);
-  if (bestGeneric) return bestGeneric;
+  if (bestGeneric) {
+    const winningTier = tier(bestGeneric, activeIngredient);
+    console.log("[RECETAS] winner from round2 — tier:", winningTier, "match:", bestGeneric.name, "generic:", bestGeneric.generic_name);
+    return bestGeneric;
+  }
 
   // Prefix fallback (first 5 chars)
   const prefix = activeIngredient.slice(0, 5);
   if (prefix.length < 4) return null;
 
-  const { data: byPrefix } = await supabase
+  const { data: byPrefix, error: e4 } = await supabase
     .from("products")
     .select(SELECT)
     .ilike("name", `%${prefix}%`)
     .order("name")
     .limit(10);
 
-  return pickBest((byPrefix ?? []) as ProductRow[], prefix);
+  console.log("[RECETAS] byPrefix (name ilike prefix):", byPrefix?.length ?? 0, e4?.message ?? "ok", byPrefix?.map(r => r.name));
+
+  const bestPrefix = pickBest((byPrefix ?? []) as ProductRow[], prefix);
+  if (bestPrefix) {
+    const winningTier = tier(bestPrefix, prefix);
+    console.log("[RECETAS] winner from prefix fallback — tier:", winningTier, "match:", bestPrefix.name, "generic:", bestPrefix.generic_name);
+  } else {
+    console.log("[RECETAS] NO MATCH FOUND for:", activeIngredient);
+  }
+  return bestPrefix;
 }
 
 export async function POST(req: NextRequest) {
