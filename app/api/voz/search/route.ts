@@ -6,10 +6,19 @@ export const maxDuration = 30;
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const SYSTEM = `Eres un asistente de Farmatodo. El usuario te dictó algo por voz. Detecta si está pidiendo:
+const SYSTEM = `Eres un asistente de Farmatodo. Detecta si el usuario está pidiendo:
 
-MODO A — Medicamentos específicos (ej: 'acetaminofén, ibuprofeno'):
-Devuelve: { "mode": "explicit", "items": [{ "query": "acetaminofen", "dose": "" }] }
+MODO A — Medicamentos o marcas específicas (ej: 'Atamel, Pepto, ibuprofeno'):
+Devuelve: { "mode": "explicit", "items": [{ "query": "<lo que dijo el usuario, tal cual>", "fallback": "<principio activo si es marca>", "dose": "" }] }
+
+IMPORTANTE: Si el usuario dice una marca comercial venezolana (Atamel, Pepto, Vick, Buscapina, Tabcin, Mejoral, Advil, Panadol, Tylenol, Alka-Seltzer, Nexium, Bayaspirina, Aspirina Bayer, Dolofin, Picot, Sal de Uvas, Eno, Milanta, Rinex, Noxa, Dramamine, Loratadina, Hidracort, etc.), MANTÉN la marca en 'query' y pon el principio activo en 'fallback'.
+
+Ejemplos:
+- Usuario dice 'dame un Atamel' → { "query": "atamel", "fallback": "acetaminofen", "dose": "" }
+- Usuario dice 'necesito Pepto' → { "query": "pepto", "fallback": "subsalicilato bismuto", "dose": "" }
+- Usuario dice 'ibuprofeno 400' → { "query": "ibuprofeno", "fallback": "", "dose": "400" }
+- Usuario dice 'Buscapina' → { "query": "buscapina", "fallback": "butilhioscina", "dose": "" }
+- Usuario dice 'curitas' → { "query": "curitas", "fallback": "", "dose": "" }
 
 MODO B — Síntomas o malestar (ej: 'me duele la cabeza', 'tengo gripe', 'me duele la barriga'):
 Devuelve: { "mode": "symptom", "symptom": "<síntoma resumido>", "items": [{ "query": "<medicamento OTC sugerido>", "reason": "<por qué este>" }, ...] }
@@ -32,12 +41,19 @@ Solo devuelve JSON. NADA de texto conversacional.
 NO des consejo médico. NO diagnostiques.
 Si el síntoma sugiere algo grave (dolor en el pecho, dificultad para respirar, sangrado, dolor severo), devuelve: { "mode": "urgent", "message": "Te recomendamos consultar a un médico de inmediato." }`;
 
-type ExplicitItem = { query: string; dose: string };
+type ExplicitItem = { query: string; fallback: string; dose: string };
 type SymptomItem = { query: string; reason: string };
 type ClaudeResult =
   | { mode: "explicit"; items: ExplicitItem[] }
   | { mode: "symptom"; symptom: string; items: SymptomItem[] }
   | { mode: "urgent"; message: string };
+
+async function findWithFallback(query: string, fallback: string) {
+  const primary = await findProductByIngredient(query);
+  if (primary) return primary;
+  if (fallback?.trim()) return findProductByIngredient(fallback);
+  return null;
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -95,14 +111,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ mode: "symptom", symptom, results });
     }
 
-    // explicit mode
+    // explicit mode — try brand name first, fall back to generic if no match
     const items = (parsed as { mode: "explicit"; items: ExplicitItem[] }).items ?? [];
     if (!items.length) {
       return NextResponse.json({ error: "No se detectaron medicamentos en el audio.", results: [] });
     }
     const results = await Promise.all(
       items.map(async (item) => {
-        const product = await findProductByIngredient(item.query);
+        const product = await findWithFallback(item.query, item.fallback ?? "");
         return {
           query: item.query,
           dose: item.dose ?? "",
