@@ -5,113 +5,94 @@ export const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
+export type ChronicStatus = "vencido" | "hoy" | "urgente" | "proximo" | "ok";
+
 export type ChronicPatient = {
   id: number;
   name: string;
-  medication: string;
-  dosage: string;
-  next_refill_label: string;
-  adherence: number;
-  urgency: "high" | "medium" | "low";
-  store: string;
   phone: string;
+  medication: string;
+  fullProductName: string;
+  dosage_instructions: string | null;
+  next_refill_date: string | null;
+  daysUntilRefill: number;
+  status: ChronicStatus;
+  next_refill_label: string;
 };
 
-// The real chronic_medications table has FK schema:
-// customer_id → customers(name, phone, preferred_store)
-// product_id  → products(name)
-// No name/medication/adherence columns — those come from JOINs.
-// For the pitch demo we always fall back to these 3 patients when the
-// JOIN returns nothing (table empty or no test customers seeded).
-const SEED_PATIENTS: Omit<ChronicPatient, "id">[] = [
-  {
-    name: "María García",
-    medication: "Losartan 50mg",
-    dosage: "LOSARTÁN MK 50MG X 30 TAB",
-    next_refill_label: "3 días",
-    adherence: 88,
-    urgency: "high",
-    store: "Farmatodo Chacao",
-    phone: "+584141234567",
-  },
-  {
-    name: "Carlos Rodríguez",
-    medication: "Metformina 850mg",
-    dosage: "METFORMINA PORTUGAL 850MG X 30 TAB",
-    next_refill_label: "Hoy",
-    adherence: 72,
-    urgency: "high",
-    store: "Farmatodo Las Mercedes",
-    phone: "+584161234567",
-  },
-  {
-    name: "Ana Martínez",
-    medication: "Enalapril 10mg",
-    dosage: "ENALAPRIL CALOX 10MG X 30 TAB",
-    next_refill_label: "Viernes",
-    adherence: 95,
-    urgency: "medium",
-    store: "Farmatodo Altamira",
-    phone: "+584121234567",
-  },
-];
+function shortMedName(fullName: string): string {
+  const doseMatch = fullName.match(/(\d+[\s.,]*(?:mg|Mg|MG|mcg|g|G)\b)/);
+  const firstWord = fullName.split(/\s+/)[0];
+  if (!doseMatch) return firstWord;
+  const dose = doseMatch[1].replace(/\s+/g, "").replace(",", ".").toLowerCase();
+  return `${firstWord} ${dose}`;
+}
 
-function daysLabel(dateStr: string | null): { label: string; urgency: "high" | "medium" | "low" } {
-  if (!dateStr) return { label: "Próximamente", urgency: "medium" };
-  const days = Math.ceil(
-    (new Date(dateStr).getTime() - Date.now()) / 86_400_000
-  );
-  if (days <= 0) return { label: "Hoy", urgency: "high" };
-  if (days === 1) return { label: "Mañana", urgency: "high" };
-  if (days <= 3) return { label: `${days} días`, urgency: "high" };
-  if (days <= 7) return { label: `${days} días`, urgency: "medium" };
-  return { label: `${days} días`, urgency: "low" };
+function computeDays(dateStr: string | null): number {
+  if (!dateStr) return 999;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const refill = new Date(dateStr + "T00:00:00");
+  return Math.round((refill.getTime() - today.getTime()) / 86_400_000);
+}
+
+function getStatus(days: number): ChronicStatus {
+  if (days < 0) return "vencido";
+  if (days === 0) return "hoy";
+  if (days <= 2) return "urgente";
+  if (days <= 7) return "proximo";
+  return "ok";
+}
+
+function refillLabel(days: number, dateStr: string | null): string {
+  if (days < 0) return days === -1 ? "Ayer" : `Hace ${Math.abs(days)} días`;
+  if (days === 0) return "Hoy";
+  if (days === 1) return "Mañana";
+  if (days <= 7) return `En ${days} días`;
+  if (!dateStr) return "Próximamente";
+  const d = new Date(dateStr + "T12:00:00");
+  return d.toLocaleDateString("es-VE", { day: "numeric", month: "long" });
 }
 
 export async function getChronicPatients(): Promise<ChronicPatient[]> {
-  // Try the real schema: chronic_medications joined with customers + products
   const { data, error } = await supabase
     .from("chronic_medications")
     .select(`
       id,
-      next_reminder_date,
-      customers ( name, phone, preferred_store ),
-      products ( name )
+      dosage_instructions,
+      refill_interval_days,
+      last_refill_date,
+      next_refill_date,
+      active,
+      customers ( id, name, phone, cedula ),
+      products ( id, name )
     `)
     .eq("active", true)
-    .limit(20);
+    .order("next_refill_date", { ascending: true });
 
-  // Any error (table missing, permission, etc.) → use seed
   if (error) {
-    console.warn("[chronic_medications] query error:", error.message);
-    return SEED_PATIENTS.map((p, i) => ({ ...p, id: i + 1 }));
+    console.error("[chronic_medications] query error:", error.message);
+    return [];
   }
 
-  // Table empty or JOIN produced no usable rows → use seed
-  const usable = (data ?? []).filter(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (row: any) => row.customers?.name && row.products?.name
-  );
-  if (usable.length === 0) {
-    return SEED_PATIENTS.map((p, i) => ({ ...p, id: i + 1 }));
-  }
-
-  // Map real joined rows to ChronicPatient
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return usable.map((row: any, i: number) => {
-    const { label, urgency } = daysLabel(row.next_reminder_date);
-    const seed = SEED_PATIENTS[i % SEED_PATIENTS.length];
-    return {
-      id: row.id,
-      name: row.customers.name,
-      medication: row.products.name,
-      dosage: row.products.name,
-      next_refill_label: label,
-      // adherence not in schema — use seed value as stand-in
-      adherence: seed.adherence,
-      urgency,
-      store: row.customers.preferred_store ?? seed.store,
-      phone: row.customers.phone ?? seed.phone,
-    };
-  });
+  return (data ?? [])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .filter((row: any) => row.customers?.name && row.products?.name)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .map((row: any) => {
+      const days = computeDays(row.next_refill_date);
+      return {
+        id: row.id,
+        name: row.customers.name,
+        phone: row.customers.phone ?? "",
+        medication: shortMedName(row.products.name),
+        fullProductName: row.products.name,
+        dosage_instructions: row.dosage_instructions ?? null,
+        next_refill_date: row.next_refill_date ?? null,
+        daysUntilRefill: days,
+        status: getStatus(days),
+        next_refill_label: refillLabel(days, row.next_refill_date),
+      };
+    });
 }
