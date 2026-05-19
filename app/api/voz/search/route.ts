@@ -112,12 +112,12 @@ export async function POST(req: NextRequest) {
     }
     const results = await Promise.all(
       items.map(async (item) => {
-        const product = await findBestMatch(item.query, item.fallback ?? "");
+        const { exactMatch } = await findBestMatch(item.query, item.fallback ?? "");
         return {
           query: item.query,
           dose: item.dose ?? "",
-          matched: product?.name ?? null,
-          available: product !== null,
+          matched: exactMatch?.name ?? null,
+          available: exactMatch !== null,
         };
       })
     );

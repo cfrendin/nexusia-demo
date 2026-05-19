@@ -1,25 +1,38 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useCallback } from "react";
 
 type State = "idle" | "processing" | "results" | "error";
+
+type ProductOption = { id: number; name: string };
 
 type ResultRow = {
   written: string;
   matched: string | null;
+  matchedId: number | null;
   confidence: number;
   available: boolean;
+  matchStatus: "confirmed" | "review" | "not_found";
+  suggestions: ProductOption[];
+};
+
+type ItemState = {
+  manualOpen: boolean;
+  query: string;
+  searchResults: ProductOption[];
+  searching: boolean;
 };
 
 export default function RecetasPage() {
   const [state, setState] = useState<State>("idle");
   const [results, setResults] = useState<ResultRow[]>([]);
+  const [itemStates, setItemStates] = useState<ItemState[]>([]);
   const [errorMsg, setErrorMsg] = useState("");
   const [toast, setToast] = useState(false);
   const [cartAdded, setCartAdded] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const debounceTimers = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
 
-  // Compress image to max 1400px / 85% JPEG to stay under Vercel's 4.5MB body limit
   const compressImage = (dataUrl: string): Promise<string> =>
     new Promise((resolve) => {
       const img = new Image();
@@ -32,7 +45,7 @@ export default function RecetasPage() {
         canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
         resolve(canvas.toDataURL("image/jpeg", 0.85));
       };
-      img.onerror = () => resolve(dataUrl); // fallback: send original
+      img.onerror = () => resolve(dataUrl);
       img.src = dataUrl;
     });
 
@@ -45,7 +58,6 @@ export default function RecetasPage() {
     setCartAdded(false);
 
     try {
-      // Convert to base64 then compress
       const raw = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result as string);
@@ -73,6 +85,14 @@ export default function RecetasPage() {
       }
 
       setResults(data.results);
+      setItemStates(
+        data.results.map(() => ({
+          manualOpen: false,
+          query: "",
+          searchResults: [],
+          searching: false,
+        }))
+      );
       setState("results");
     } catch (err: unknown) {
       setState("error");
@@ -80,7 +100,6 @@ export default function RecetasPage() {
         err instanceof Error ? err.message : "Error al procesar la receta."
       );
     } finally {
-      // Reset file input so the same file can be re-selected
       if (fileRef.current) fileRef.current.value = "";
     }
   };
@@ -89,6 +108,7 @@ export default function RecetasPage() {
     if (state === "results" || state === "error") {
       setState("idle");
       setResults([]);
+      setItemStates([]);
       setErrorMsg("");
       setCartAdded(false);
       return;
@@ -96,17 +116,89 @@ export default function RecetasPage() {
     fileRef.current?.click();
   };
 
+  const selectProduct = useCallback((idx: number, product: ProductOption) => {
+    setResults((prev) =>
+      prev.map((r, i) =>
+        i === idx
+          ? {
+              ...r,
+              matched: product.name,
+              matchedId: product.id,
+              matchStatus: "confirmed",
+              suggestions: [],
+              available: true,
+              confidence: 74,
+            }
+          : r
+      )
+    );
+    setItemStates((prev) =>
+      prev.map((s, i) =>
+        i === idx
+          ? { manualOpen: false, query: "", searchResults: [], searching: false }
+          : s
+      )
+    );
+  }, []);
+
+  const openManualSearch = useCallback((idx: number) => {
+    setItemStates((prev) =>
+      prev.map((s, i) => (i === idx ? { ...s, manualOpen: true } : s))
+    );
+  }, []);
+
+  const handleManualQuery = useCallback((idx: number, query: string) => {
+    setItemStates((prev) =>
+      prev.map((s, i) =>
+        i === idx ? { ...s, query, searching: query.length > 2 } : s
+      )
+    );
+
+    const existing = debounceTimers.current.get(idx);
+    if (existing) clearTimeout(existing);
+
+    if (query.length <= 2) {
+      setItemStates((prev) =>
+        prev.map((s, i) =>
+          i === idx ? { ...s, searchResults: [], searching: false } : s
+        )
+      );
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `/api/productos/search?q=${encodeURIComponent(query)}`
+        );
+        const data: ProductOption[] = await res.json();
+        setItemStates((prev) =>
+          prev.map((s, i) =>
+            i === idx ? { ...s, searchResults: data, searching: false } : s
+          )
+        );
+      } catch {
+        setItemStates((prev) =>
+          prev.map((s, i) => (i === idx ? { ...s, searching: false } : s))
+        );
+      }
+    }, 300);
+
+    debounceTimers.current.set(idx, timer);
+  }, []);
+
   const handleAddCart = () => {
     setCartAdded(true);
     setToast(true);
     setTimeout(() => setToast(false), 2800);
   };
 
-  const availableResults = results.filter((r) => r.available && r.matched);
+  const availableResults = results.filter(
+    (r) => r.available && r.matched && r.matchStatus === "confirmed"
+  );
 
   return (
     <div className="flex flex-col min-h-full">
-      {/* Hidden file input — camera on mobile */}
       <input
         ref={fileRef}
         type="file"
@@ -116,7 +208,7 @@ export default function RecetasPage() {
         onChange={handleFileChange}
       />
 
-      {/* Page header */}
+      {/* Header */}
       <div className="px-5 pt-10 pb-5" style={{ background: "#0B3D6B" }}>
         <p
           className="text-white/50 text-[10px] uppercase tracking-widest mb-1"
@@ -138,7 +230,7 @@ export default function RecetasPage() {
         </p>
       </div>
 
-      {/* Scan area */}
+      {/* Main content */}
       <div className="px-4 pt-5">
         {state === "idle" && (
           <button
@@ -242,40 +334,180 @@ export default function RecetasPage() {
               </button>
             </div>
 
-            <div
-              className="rounded-2xl overflow-hidden"
-              style={{ border: "1px solid rgba(11,61,107,0.08)", boxShadow: "0 1px 4px rgba(11,61,107,0.06)" }}
-            >
-              {results.map((med, i) => (
-                <div
-                  key={i}
-                  className={`bg-white p-3 ${i < results.length - 1 ? "border-b" : ""}`}
-                  style={{ borderColor: "rgba(11,61,107,0.06)" }}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs mb-0.5" style={{ color: "#94a3b8", fontFamily: "var(--font-dm-sans)" }}>
-                        {med.written}
-                      </p>
-                      <p className="text-xs font-semibold leading-tight" style={{ color: "#1a2332", fontFamily: "var(--font-dm-sans)" }}>
-                        {med.matched ?? "Sin coincidencia en catálogo"}
-                      </p>
-                    </div>
-                    <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                      {med.confidence > 0 && (
-                        <span className="chip-confidence">{med.confidence}%</span>
+            <div className="flex flex-col gap-2">
+              {results.map((med, i) => {
+                const istate = itemStates[i] ?? { manualOpen: false, query: "", searchResults: [], searching: false };
+
+                return (
+                  <div
+                    key={i}
+                    className="bg-white rounded-2xl overflow-hidden"
+                    style={{ border: "1px solid rgba(11,61,107,0.08)", boxShadow: "0 1px 4px rgba(11,61,107,0.06)" }}
+                  >
+                    {/* Status bar */}
+                    <div
+                      className="px-3 py-2 flex items-center gap-2"
+                      style={{
+                        background:
+                          med.matchStatus === "confirmed"
+                            ? "rgba(22,163,74,0.06)"
+                            : med.matchStatus === "review"
+                            ? "rgba(234,179,8,0.08)"
+                            : "rgba(220,38,38,0.06)",
+                        borderBottom: "1px solid",
+                        borderColor:
+                          med.matchStatus === "confirmed"
+                            ? "rgba(22,163,74,0.12)"
+                            : med.matchStatus === "review"
+                            ? "rgba(234,179,8,0.15)"
+                            : "rgba(220,38,38,0.12)",
+                      }}
+                    >
+                      {med.matchStatus === "confirmed" && (
+                        <>
+                          <span style={{ fontSize: 13 }}>✅</span>
+                          <span className="text-xs font-medium" style={{ color: "#16a34a", fontFamily: "var(--font-dm-sans)" }}>
+                            Confirmado
+                          </span>
+                        </>
                       )}
-                      {med.matched ? (
-                        med.available
-                          ? <span className="chip-available">Disponible</span>
-                          : <span className="chip-unavailable">Agotado</span>
-                      ) : (
-                        <span className="chip-unavailable">No encontrado</span>
+                      {med.matchStatus === "review" && (
+                        <>
+                          <span style={{ fontSize: 13 }}>⚠️</span>
+                          <span className="text-xs font-medium" style={{ color: "#a16207", fontFamily: "var(--font-dm-sans)" }}>
+                            Revisar — selecciona la opción correcta
+                          </span>
+                        </>
+                      )}
+                      {med.matchStatus === "not_found" && (
+                        <>
+                          <span style={{ fontSize: 13 }}>❌</span>
+                          <span className="text-xs font-medium" style={{ color: "#dc2626", fontFamily: "var(--font-dm-sans)" }}>
+                            No encontrado — busca manualmente
+                          </span>
+                        </>
+                      )}
+                    </div>
+
+                    {/* Med info */}
+                    <div className="p-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <p
+                            className="text-xs mb-0.5"
+                            style={{
+                              color: "#94a3b8",
+                              fontFamily: "var(--font-dm-sans)",
+                              textDecoration: med.matchStatus === "review" ? "line-through" : "none",
+                            }}
+                          >
+                            {med.written}
+                          </p>
+                          {med.matched && (
+                            <p className="text-xs font-semibold leading-tight" style={{ color: "#1a2332", fontFamily: "var(--font-dm-sans)" }}>
+                              {med.matched}
+                            </p>
+                          )}
+                        </div>
+                        {med.matchStatus === "confirmed" && med.confidence > 0 && (
+                          <span className="chip-confidence flex-shrink-0">{med.confidence}%</span>
+                        )}
+                      </div>
+
+                      {/* Suggestions for review items */}
+                      {med.matchStatus === "review" && !istate.manualOpen && (
+                        <div className="mt-2 flex flex-col gap-1.5">
+                          {med.suggestions.map((sug) => (
+                            <button
+                              key={sug.id}
+                              onClick={() => selectProduct(i, sug)}
+                              className="w-full text-left px-3 py-2 rounded-lg text-xs font-medium transition-all active:scale-[0.98]"
+                              style={{
+                                background: "rgba(11,61,107,0.04)",
+                                border: "1px solid rgba(11,61,107,0.1)",
+                                color: "#0B3D6B",
+                                fontFamily: "var(--font-dm-sans)",
+                              }}
+                            >
+                              {sug.name}
+                            </button>
+                          ))}
+                          <button
+                            onClick={() => openManualSearch(i)}
+                            className="w-full text-center px-3 py-2 rounded-lg text-xs transition-all"
+                            style={{
+                              color: "#64748b",
+                              fontFamily: "var(--font-dm-sans)",
+                              border: "1px dashed rgba(100,116,139,0.3)",
+                            }}
+                          >
+                            Ninguno de estos — buscar manualmente
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Manual search — shown for not_found or when "Ninguno de estos" tapped */}
+                      {(med.matchStatus === "not_found" || istate.manualOpen) && (
+                        <div className="mt-2">
+                          <div
+                            className="flex items-center gap-2 px-3 py-2 rounded-lg"
+                            style={{ background: "rgba(11,61,107,0.04)", border: "1px solid rgba(11,61,107,0.1)" }}
+                          >
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <circle cx="11" cy="11" r="8" />
+                              <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                            </svg>
+                            <input
+                              type="text"
+                              value={istate.query}
+                              onChange={(e) => handleManualQuery(i, e.target.value)}
+                              placeholder="Escribe el medicamento..."
+                              autoFocus
+                              className="flex-1 bg-transparent text-xs outline-none"
+                              style={{ color: "#1a2332", fontFamily: "var(--font-dm-sans)" }}
+                            />
+                            {istate.searching && (
+                              <div
+                                className="w-3 h-3 rounded-full border animate-spin flex-shrink-0"
+                                style={{ borderColor: "rgba(0,165,181,0.3)", borderTopColor: "#00A5B5" }}
+                              />
+                            )}
+                          </div>
+
+                          {istate.searchResults.length > 0 && (
+                            <div
+                              className="mt-1.5 rounded-lg overflow-hidden"
+                              style={{ border: "1px solid rgba(11,61,107,0.08)" }}
+                            >
+                              {istate.searchResults.map((prod, pi) => (
+                                <button
+                                  key={prod.id}
+                                  onClick={() => selectProduct(i, prod)}
+                                  className="w-full text-left px-3 py-2.5 text-xs transition-all active:bg-blue-50"
+                                  style={{
+                                    background: "white",
+                                    color: "#1a2332",
+                                    fontFamily: "var(--font-dm-sans)",
+                                    borderTop: pi > 0 ? "1px solid rgba(11,61,107,0.06)" : "none",
+                                  }}
+                                >
+                                  {prod.name}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+
+                          {!istate.searching && istate.query.length > 2 && istate.searchResults.length === 0 && (
+                            <p className="mt-1.5 text-xs text-center" style={{ color: "#94a3b8", fontFamily: "var(--font-dm-sans)" }}>
+                              Sin resultados para &ldquo;{istate.query}&rdquo;
+                            </p>
+                          )}
+                        </div>
                       )}
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             {availableResults.length > 0 && (
@@ -312,7 +544,7 @@ export default function RecetasPage() {
         )}
       </div>
 
-      {/* How it works — shown only in idle state */}
+      {/* How it works */}
       {state === "idle" && (
         <div className="px-4 mt-5">
           <p className="text-xs uppercase tracking-widest mb-3" style={{ color: "#94a3b8", fontFamily: "var(--font-dm-sans)", letterSpacing: "0.1em" }}>

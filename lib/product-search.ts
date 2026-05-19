@@ -1,6 +1,14 @@
+import Fuse from "fuse.js";
 import { supabase } from "@/lib/supabase";
 
-type ProductRow = { name: string; generic_name: string | null };
+type ProductRow = { id: number; name: string; generic_name: string | null };
+
+export type ProductMatch = { id: number; name: string };
+
+export type SearchResult = {
+  exactMatch: ProductMatch | null;
+  suggestions: ProductMatch[];
+};
 
 const isCombo = (row: ProductRow) =>
   (!!row.generic_name && row.generic_name.includes("+")) || row.name.includes("+");
@@ -26,10 +34,42 @@ function pickBest(rows: ProductRow[], query: string): ProductRow | null {
   );
 }
 
+async function fuzzyFallback(term: string): Promise<ProductMatch[]> {
+  const firstLetter = term[0]?.toUpperCase() ?? "";
+  if (!firstLetter) return [];
+
+  const { data: candidates } = await supabase
+    .from("products")
+    .select("id, name")
+    .ilike("name", `${firstLetter}%`)
+    .limit(300);
+
+  if (!candidates?.length) return [];
+
+  // Filter by first-word length ±3 to narrow the fuzzy pool
+  const termLen = term.length;
+  const pool = (candidates as { id: number; name: string }[]).filter((p) => {
+    const firstWord = p.name.split(/\s+/)[0] ?? "";
+    return Math.abs(firstWord.length - termLen) <= 3;
+  });
+
+  const fuse = new Fuse(pool, {
+    keys: ["name"],
+    threshold: 0.4,
+    includeScore: true,
+  });
+
+  return fuse
+    .search(term)
+    .filter((r) => (r.score ?? 1) < 0.4)
+    .slice(0, 3)
+    .map((r) => ({ id: r.item.id, name: r.item.name }));
+}
+
 export async function findProductByIngredient(
   activeIngredient: string
 ): Promise<{ name: string } | null> {
-  const SELECT = "name, generic_name";
+  const SELECT = "id, name, generic_name";
 
   const [{ data: byExact }, { data: byName }] = await Promise.all([
     supabase.from("products").select(SELECT).ilike("generic_name", activeIngredient).order("name").limit(10),
@@ -58,33 +98,61 @@ export async function findProductByIngredient(
 export async function findBestMatch(
   query: string,
   fallback: string
-): Promise<{ name: string } | null> {
+): Promise<SearchResult> {
   const q = query.trim();
 
   // Tier 1: query in name, single drug
   const { data: t1 } = await supabase
-    .from("products").select("name").ilike("name", `%${q}%`).not("name", "ilike", "%+%").limit(5);
-  if (t1?.length) return t1[0];
+    .from("products").select("id, name").ilike("name", `%${q}%`).not("name", "ilike", "%+%").limit(5);
+  if ((t1 as ProductMatch[] | null)?.length) {
+    const r = (t1 as ProductMatch[])[0];
+    return { exactMatch: { id: r.id, name: r.name }, suggestions: [] };
+  }
 
   // Tier 2: query in name, combos allowed
   const { data: t2 } = await supabase
-    .from("products").select("name").ilike("name", `%${q}%`).limit(5);
-  if (t2?.length) return t2[0];
+    .from("products").select("id, name").ilike("name", `%${q}%`).limit(5);
+  if ((t2 as ProductMatch[] | null)?.length) {
+    const r = (t2 as ProductMatch[])[0];
+    return { exactMatch: { id: r.id, name: r.name }, suggestions: [] };
+  }
 
   const fb = fallback?.trim();
-  if (!fb || fb === q) return null;
+  if (fb && fb !== q) {
+    // Tier 3: fallback in name, single drug
+    const { data: t3 } = await supabase
+      .from("products").select("id, name").ilike("name", `%${fb}%`).not("name", "ilike", "%+%").limit(5);
+    if ((t3 as ProductMatch[] | null)?.length) {
+      const r = (t3 as ProductMatch[])[0];
+      return { exactMatch: { id: r.id, name: r.name }, suggestions: [] };
+    }
 
-  // Tier 3: fallback (generic) in name, single drug
-  const { data: t3 } = await supabase
-    .from("products").select("name").ilike("name", `%${fb}%`).not("name", "ilike", "%+%").limit(5);
-  if (t3?.length) return t3[0];
+    // Tier 4: fallback in name, combos allowed
+    const { data: t4 } = await supabase
+      .from("products").select("id, name").ilike("name", `%${fb}%`).limit(5);
+    if ((t4 as ProductMatch[] | null)?.length) {
+      const r = (t4 as ProductMatch[])[0];
+      return { exactMatch: { id: r.id, name: r.name }, suggestions: [] };
+    }
+  }
 
-  // Tier 4: fallback in name, combos allowed
-  const { data: t4 } = await supabase
-    .from("products").select("name").ilike("name", `%${fb}%`).limit(5);
-  if (t4?.length) return t4[0];
+  // Fuzzy fallback: combine suggestions from both query and fallback
+  const [primSuggs, fbSuggs] = await Promise.all([
+    fuzzyFallback(q),
+    fb && fb !== q ? fuzzyFallback(fb) : Promise.resolve([]),
+  ]);
 
-  return null;
+  const seen = new Set<number>();
+  const merged: ProductMatch[] = [];
+  for (const s of [...primSuggs, ...fbSuggs]) {
+    if (!seen.has(s.id)) {
+      seen.add(s.id);
+      merged.push(s);
+      if (merged.length >= 3) break;
+    }
+  }
+
+  return { exactMatch: null, suggestions: merged };
 }
 
 export function extractActiveIngredient(nombre: string): string {

@@ -1,21 +1,25 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { NextRequest, NextResponse } from "next/server";
-import { findBestMatch } from "@/lib/product-search";
+import { findBestMatch, ProductMatch } from "@/lib/product-search";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 type MedExtracted = {
-  nombre: string;
-  marca?: string;
-  dosis?: string;
-  presentacion?: string;
+  medication_name_primary: string;
+  medication_name_alternatives?: string[];
+  confidence: "high" | "medium" | "low";
+  dosage?: string;
+  quantity?: string;
 };
 
 type ResultRow = {
   written: string;
   matched: string | null;
+  matchedId: number | null;
   confidence: number;
   available: boolean;
+  matchStatus: "confirmed" | "review" | "not_found";
+  suggestions: ProductMatch[];
 };
 
 function extractActiveIngredient(nombre: string): string {
@@ -74,7 +78,7 @@ export async function POST(req: NextRequest) {
 
     const visionResponse = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 1024,
+      max_tokens: 1536,
       messages: [
         {
           role: "user",
@@ -85,14 +89,27 @@ export async function POST(req: NextRequest) {
             },
             {
               type: "text",
-              text: `Analiza esta receta médica. Extrae cada medicamento.
-Responde ÚNICAMENTE con JSON válido, sin texto adicional ni markdown:
-[{"nombre": "nombre genérico", "marca": "marca comercial si se menciona, si no vacío", "dosis": "dosis y unidad", "presentacion": "forma farmacéutica"}]
-Ejemplos:
-- "Atamel 500mg tabletas" → {"nombre":"Acetaminofén","marca":"atamel","dosis":"500 mg","presentacion":"tabletas"}
-- "Metformina 850mg" → {"nombre":"Metformina","marca":"","dosis":"850 mg","presentacion":"tabletas"}
-- "Nexium 20mg" → {"nombre":"Esomeprazol","marca":"nexium","dosis":"20 mg","presentacion":"cápsulas"}
-Si no es una receta o no puedes leerla, responde: []`,
+              text: `Analiza esta receta médica venezolana. Extrae cada medicamento con la siguiente estructura JSON.
+Responde ÚNICAMENTE con un array JSON válido, sin texto adicional ni markdown:
+
+[
+  {
+    "medication_name_primary": "tu mejor lectura del nombre",
+    "medication_name_alternatives": ["variante1", "variante2"],
+    "confidence": "high",
+    "dosage": "dosis si es legible",
+    "quantity": "cantidad si está escrita"
+  }
+]
+
+REGLAS DE TRANSCRIPCIÓN:
+- Si la letra es ambigua entre dos posibles palabras, incluye AMBAS en medication_name_alternatives. Ejemplo: si ves "Lepr/nit" incluye "Leprit" y "Lepnit".
+- Marca confidence="low" si tienes menos del 70% de seguridad en la lectura.
+- Marca confidence="medium" si entre 70-90% de seguridad.
+- Considera marcas comerciales venezolanas comunes: Atamel, Pepto, Vick, Nexium, Leprit, Buscapina, Tabcin, Mejoral, Advil, Panadol, Tylenol, Losartán, Atorvastatina, Esomeprazol, Metformina, Omeprazol, Ibuprofeno, Amoxicilina.
+- Si una letra puede ser "i", "n" o "u" (común en cursiva manuscrita), genera variantes con cada una en medication_name_alternatives.
+- medication_name_primary debe ser el nombre del medicamento sin dosis (solo nombre).
+- Si no es una receta o no puedes leerla, responde: []`,
             },
           ],
         },
@@ -124,23 +141,60 @@ Si no es una receta o no puedes leerla, responde: []`,
 
     const results: ResultRow[] = await Promise.all(
       medications.map(async (med) => {
-        const rawNombre = med.nombre?.trim() ?? "";
-        const rawDosis = med.dosis?.trim() ?? "";
-        const activeIngredient = extractActiveIngredient(rawNombre);
-        const marca = med.marca?.trim().toLowerCase() ?? "";
-        const written = rawDosis ? `${rawNombre} ${rawDosis}` : rawNombre;
+        const primaryName = med.medication_name_primary?.trim() ?? "";
+        const alternatives = (med.medication_name_alternatives ?? []).filter(
+          (a) => a && a.trim() !== primaryName
+        );
+        const dosage = med.dosage?.trim() ?? "";
+        const written = dosage ? `${primaryName} ${dosage}` : primaryName;
+        const activeIngredient = extractActiveIngredient(primaryName);
 
-        // Search by brand name first (tier 1-2), fall back to generic (tier 3-4)
-        const searchQuery = marca || activeIngredient;
-        const product = await findBestMatch(searchQuery, activeIngredient);
+        // Search primary name first
+        let searchResult = await findBestMatch(primaryName, activeIngredient);
+
+        // If no exact match, try each alternative
+        if (!searchResult.exactMatch && alternatives.length > 0) {
+          const altSuggestions: typeof searchResult.suggestions = [];
+
+          for (const alt of alternatives) {
+            const altResult = await findBestMatch(alt, extractActiveIngredient(alt));
+            if (altResult.exactMatch) {
+              searchResult = altResult;
+              break;
+            }
+            altSuggestions.push(...altResult.suggestions);
+          }
+
+          // Merge suggestions if still no exact match
+          if (!searchResult.exactMatch) {
+            const seen = new Set<number>(searchResult.suggestions.map((s) => s.id));
+            for (const s of altSuggestions) {
+              if (!seen.has(s.id)) {
+                seen.add(s.id);
+                searchResult.suggestions.push(s);
+              }
+            }
+            searchResult.suggestions = searchResult.suggestions.slice(0, 3);
+          }
+        }
+
+        const { exactMatch, suggestions } = searchResult;
+        const matchStatus = exactMatch
+          ? "confirmed"
+          : suggestions.length > 0
+          ? "review"
+          : "not_found";
 
         return {
           written,
-          matched: product?.name ?? null,
-          confidence: product
-            ? confidenceScore(activeIngredient, product.name, written)
+          matched: exactMatch?.name ?? null,
+          matchedId: exactMatch?.id ?? null,
+          confidence: exactMatch
+            ? confidenceScore(activeIngredient, exactMatch.name, written)
             : 0,
-          available: product !== null,
+          available: exactMatch !== null,
+          matchStatus,
+          suggestions,
         };
       })
     );
